@@ -21,3 +21,7 @@
 
 * a **thunk** is the unevaluated form of an expression.
 *
+
+### Think views in scala are lazy collections.
+
+> non-strictness can improve modularity by *separating the description* of an expression *from the how-and-when of its evaluation*. Keeping these concerns separate lets us reuse a description in multiple contexts, evaluating different portions of our expression to obtain different results.

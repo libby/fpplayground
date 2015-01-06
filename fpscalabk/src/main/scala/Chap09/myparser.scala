@@ -8,35 +8,79 @@ case class State[S,A](run: S => (A,S))
 // needs some input => input output
 trait ParserValue[+A] {
     val value: Option[A]
-    val previousMatches: List[A]
-    def endOfInput: Boolean
 }
-case class Match[A](value: Option[A], previousMatches: List[A], msg: String = "default message") extends ParserValue[A] {
-    def endOfInput = false
-}
+case class Match[A](value: Option[A], msg: String = "default message") extends ParserValue[A] 
+/**
+ * used for fold as the initial value, if the ZeroState is used in the zero parser as the unit state, i.e. zero element of addition == 0
+ * 
+ */ 
 case object ZeroState extends ParserValue[Nothing] {
-    def endOfInput = false
-    val value = None
-    val previousMatches = Nil
-}
-case class ParserError[A](previousMatches: List[A], errorMsg: String) extends ParserValue[A] {
-    def endOfInput = false
     val value = None
 }
-case class End[A](value: Option[A], previousMatches: List[A]) extends ParserValue[A] {
-    def endOfInput = true
+case class ParserError[A](errorMsg: String) extends ParserValue[A] {
+    val value = None
 }
+case class EOF[A](value: Option[A]) extends ParserValue[A]
 
 // case class ParserGeneral[Input, A](parse: State[ Input, ParserValue[A] ])
 // type Parser[A] = ParserGeneral[String, A]
+object alias {
+    type ParserState[A] =  State[ (String, List[A]), ParserValue[A] ]
+}
 
 /**
  * Parser is a State Monad 
  */
-case class Parser[A](parse: State[ (String, List[A]), ParserValue[A] ]) {
+case class Parser[A](parse: State[ (String, List[String]), ParserValue[A] ]) {
+
+    import alias._   
+    
+    //def map2[B,C](pb:Parser[B])(f: (A,B) => C ): Parser[C]
     
     // def map2(parser1: Parser[A], parser2: Parser[A])(f: (A,A) => A): Parser[A]
-
+    def flatMap[B](f: ParserValue[A] => Parser[B]): Parser[B] = Parser[B] {
+        State ( {
+                    case (input, prevMatches) => {
+                        //val (parserVal, (nextInput, _) ) = this.parse.run((input, Nil))
+                        val (parserVal, nextState ) = this.parse.run((input, prevMatches))
+                        f(parserVal).parse.run( nextState ) //parserVal.previousMatches
+                    }
+                }
+              )
+    }
+    
+    def pred(p: Char => Boolean): Parser[A] = Parser[A] {
+        State({
+            
+            case (input, prevMatches) if (!input.isEmpty) => 
+                val c = input(0)
+                if ( p(c) ) this.parse.run((input, prevMatches))
+                else (ParserError("predicate did not pass! =("), (input, prevMatches))
+                    
+            case (input, prevMatches) => (ParserError("input what emtpy when testing predicate! =("), (input, prevMatches))
+            
+        })
+    }
+    
+    // this succeeds breark else try p2
+    def |(p2: Parser[A]): Parser[A] = or(p2)
+     
+    def or(p2: Parser[A]): Parser[A] = Parser[A]{
+        State({
+                case (inputStr, prevMatches) => 
+                    this.parse.run((inputStr, prevMatches)) match {
+                        // error try the next guy
+                        case (error@ParserError(msg), _) => p2.parse.run((inputStr,prevMatches))
+                        // anything else, just return the value
+                        case p1Res@_ => p1Res
+                    }
+              }
+          )
+    }
+    
+    // alias for chain
+    def >>(p2: Parser[A]): Parser[A] = chain(p2)
+    
     /**
      * parserA.chain(zeroParser) and zeroParser.chain(parserA) should both
      * return parserA unchanged.
@@ -48,7 +92,7 @@ case class Parser[A](parse: State[ (String, List[A]), ParserValue[A] ]) {
             State (
                 input => { // (A,S)
                   this.parse.run(input) match {
-                      case (p1ParserVal@Match(v, prev, msg), p1NextInput) => {
+                      case (p1ParserVal@Match(v, msg), p1NextInput) => {
                           Log.debug(s"parse value is Match ${p1ParserVal} msg is ${msg}")
                           // if p == ZeroParser parserVal
                           p2.parse.run(p1NextInput) match {
@@ -97,6 +141,7 @@ object Parser {
     //         State( { case (input, prev) => (Match(Some(a), List(a)), (input, Nil)) } )
     //     }
     
+    //
     def z[A]: Parser[A] = Parser[A](State {
         input => (ZeroState, input)
     })
@@ -108,17 +153,17 @@ object Parser {
      def char(c: Char): Parser[Char] = Parser[Char] { 
          State({
              case (input, prev) =>
-                val allMatches = (prev :+ c)
+                val allMatches = (prev :+ c.toString)
                 if (input.isEmpty) {
-                    val endState = End(Some(c), allMatches)
+                    val endState = EOF(Some(c))
                     (endState, (input, allMatches) )   
                 }
                 else if (input(0) == c) {
-                    val matchState = Match(Some(c), allMatches, s"char fun ${input.substring(1)}")
+                    val matchState = Match(Some(c), s"char fun ${input.substring(1)}")
                     (matchState -> (input.substring(1), allMatches) )
                 }
                 else {
-                    val parseError = ParserError(allMatches, s"could not parse char ${c} in string ${input}")
+                    val parseError = ParserError(s"could not parse char ${c} in string ${input}")
                     (parseError -> (input, allMatches))
                 }
          })
@@ -134,7 +179,7 @@ object Parser {
 }
 
 object Test {
-    
+    import Parser._
     def test() = {
         val p = Parser.chars('a','b','c')
         val pEnd = p.parse.run( ("abc" -> Nil) )
@@ -152,8 +197,8 @@ object Test {
         val justCharVal = justChar.parse.run((s -> Nil))
         val zeroThenCharVal = zeroThenChar.parse.run((s -> Nil))
         val charThenZeroVal = charThenZero.parse.run((s -> Nil))
-        println(s" zeroThenCharVal == justCharVal : ${zeroThenCharVal == justCharVal}")
-        println(s" charThenZeroVal == justCharVal : ${charThenZeroVal == justCharVal}")
+        println(s"zeroThenCharVal == justCharVal : ${zeroThenCharVal == justCharVal}")
+        println(s"charThenZeroVal == justCharVal : ${charThenZeroVal == justCharVal}")
         println(s"zeroThenCharVal was ${zeroThenCharVal}")
         println(s"charThenZeroVal was ${charThenZeroVal}")
     }
@@ -165,8 +210,20 @@ object Test {
         val strParser = Parser.string(stringParserText).parse
         val (parserMatchVal, matchState) = strParser.run( (inputMatch -> Nil) )
         val (parserMissVal, missState)   = strParser.run( (inputMiss -> Nil) )
-        parserMatchVal.isInstanceOf[Match[String]] == true
-        parserMissVal.isInstanceOf[ParserError[String]] == true
+        // parserMatchVal.isInstanceOf[Match[String]] == true
+        // parserMissVal.isInstanceOf[ParserError[String]] == true
+    }
+    
+    def testOr() = {
+        val pa = Parser.char('a') 
+        val pb = Parser.char('b')
+        val inputB = "basomestuff"
+        val inputA = "absomestuff"
+        val t1 = pa.or(pb).parse.run(inputB)._1.value.isDefined == true
+        val t2 = pb.or(pa).parse.run(inputB)._1.value.isDefined == true
+        val t3 = pb.or(pa).parse.run(inputA)._1.value.isDefined == true
+        val t4 = pa.or(pb).parse.run(inputA)._1.value.isDefined == true
+        println("All test passed " + List(t1,t2,t3,t4).forall(_ == true))
     }
     
 }
